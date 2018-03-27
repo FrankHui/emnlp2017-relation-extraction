@@ -10,7 +10,7 @@ np.random.seed(1)
 
 from core import keras_models, embeddings
 from keras import callbacks
-from keras.utils import np_utils
+from keras.utils import np_utils, plot_model
 from graph import io
 import hyperopt as hy
 import json
@@ -187,7 +187,6 @@ if __name__ == "__main__":
 
     if "test" in mode:
         model = load_the_model(model_name, model_params, embedding_matrix, max_sent_len, n_out)
-
         print("Testing")
         print("Results on the training set")
         evaluate(model, train_as_indices[:-1], train_as_indices[-1])
