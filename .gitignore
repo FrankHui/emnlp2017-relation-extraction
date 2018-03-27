@@ -4,6 +4,6 @@
 *.pyc
 *.pyo
 Pipfile
-glove/
-resources/data/
+resources/glove/
+data/
 trainedmodels/
