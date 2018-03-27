@@ -11,7 +11,7 @@ from keras import layers, models
 from keras import backend as K
 from keras import regularizers
 import tqdm
-
+from keras.utils import plot_model
 from core import embeddings
 from graph import graph_utils
 
@@ -141,7 +141,7 @@ def model_ContextSum(p, embeddings, max_sent_len, n_out):
 
     model = models.Model(input=[sentence_input, entity_markers], output=[main_output])
     model.compile(optimizer=p['optimizer'], loss='categorical_crossentropy', metrics=['accuracy'])
-
+    plot_model(model, '/home/xuzhemin/model.png')
     return model
 
 
