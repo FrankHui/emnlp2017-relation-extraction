@@ -251,6 +251,78 @@ def model_ContextWeighted(p, embedding_matrix, max_sent_len, n_out):
 
     return model
 
+def model_ContextWeighted_B(p, embeddings, max_sent_len, n_out):
+    print("Parameters:", p)
+
+    # Take sentence encoded as indices and convert it to embeddings
+    sentence_input = layers.Input(shape=(max_sent_len,), dtype='int32', name='sentence_input')
+    # Repeat the input 3 times as will need it once for the target entity pair and twice for the ghost pairs
+    x = layers.RepeatVector(MAX_EDGES_PER_GRAPH)(sentence_input)
+
+    # 给自己的说明，layers.Embedding(output_dim=embeddings.shape[1], input_dim=embeddings.shape[0], input_length=max_sent_len, weights=[embeddings], mask_zero=True, trainable=False)
+    # input_dim是输入的词向量的维度，输出为什么是embeddings.shape[1]，因为embeddings.shape[1]就是glove中的词的个数，输出就是各个词的概率，所以维度跟词的个数一致，没毛病。
+    word_embeddings = layers.wrappers.TimeDistributed(layers.Embedding(output_dim=embeddings.shape[1],
+                                                                       input_dim=embeddings.shape[0],
+                                                                       input_length=max_sent_len, weights=[embeddings],
+                                                                       mask_zero=True, trainable=False))(x)
+    word_embeddings = layers.Dropout(p['dropout1'])(word_embeddings)
+
+    # Take token markers that identify entity positions, convert to position embeddings
+    entity_markers = layers.Input(shape=(MAX_EDGES_PER_GRAPH, max_sent_len,), dtype='int8', name='entity_markers')
+    pos_embeddings = layers.wrappers.TimeDistributed(layers.Embedding(output_dim=p['position_emb'],
+                                                                      input_dim=4, input_length=max_sent_len,
+                                                                      mask_zero=True, W_regularizer=regularizers.l2(),
+                                                                      trainable=True))(entity_markers)
+
+    # Merge word and position embeddings and apply the specified amount of RNN layers
+    x = layers.merge([word_embeddings, pos_embeddings], mode="concat")
+    for i in range(p["rnn1_layers"] - 1):
+        x = layers.wrappers.TimeDistributed(layers.Bidirectional(
+            getattr(layers, p['rnn1'])(int(p['units1']/2), return_sequences=True,
+                                       consume_less='gpu' if p['gpu'] else "cpu")))(x)
+    sentence_matrix = layers.wrappers.TimeDistributed(layers.Bidirectional(
+        getattr(layers, p['rnn1'])(int(p['units1']/2),
+                                   return_sequences=False, consume_less='gpu' if p['gpu'] else "cpu")))(x)
+
+    ### Attention over ghosts ###
+    layers_to_concat = []
+    for i in range(MAX_EDGES_PER_GRAPH):
+        # Compute a memory vector for the target entity pair
+        sentence_vector = layers.Lambda(lambda l: l[:, i], output_shape=(p['units1'],))(sentence_matrix)
+        target_sentence_memory = layers.Dense(p['units1'], activation="linear", bias=False)(sentence_vector)
+        if i == 0:
+            context_vectors = layers.Lambda(lambda l: l[:, i + 1:],
+                                            output_shape=(MAX_EDGES_PER_GRAPH - 1, p['units1']))(sentence_matrix)
+        elif i == MAX_EDGES_PER_GRAPH - 1:
+            context_vectors = layers.Lambda(lambda l: l[:, :i], output_shape=(MAX_EDGES_PER_GRAPH - 1, p['units1']))(
+                sentence_matrix)
+        else:
+            context_vectors = layers.Lambda(lambda l: K.concatenate([l[:, :i], l[:, i + 1:]], axis=1),
+                                            output_shape=(MAX_EDGES_PER_GRAPH - 1, p['units1']))(sentence_matrix)
+        # Compute the score between each memory and the memory of the target entity pair
+        sentence_scores = layers.Merge(mode=lambda inputs: K.batch_dot(inputs[0],
+                                                                       inputs[1], axes=(1, 2)),
+                                       output_shape=(MAX_EDGES_PER_GRAPH,))([target_sentence_memory, context_vectors])
+        sentence_scores = layers.Activation('softmax')(sentence_scores)
+
+        # Compute the final vector by taking the weighted sum of context vectors and the target entity vector
+        context_vector = layers.Merge(mode=lambda inputs: K.batch_dot(inputs[0], inputs[1], axes=(1, 1)),
+                                      output_shape=(p['units1'],))([context_vectors, sentence_scores])
+        edge_vector = layers.merge([sentence_vector, context_vector], mode="concat")
+        edge_vector = layers.Reshape((1, p['units1'] * 2))(edge_vector)
+        layers_to_concat.append(edge_vector)
+
+    edge_vectors = layers.Merge(mode='concat', concat_axis=1)(layers_to_concat)
+
+    # Apply softmax
+    edge_vectors = layers.Dropout(p['dropout1'])(edge_vectors)
+    main_output = layers.wrappers.TimeDistributed(layers.Dense(n_out, activation="softmax", name='main_output'))(
+        edge_vectors)
+
+    model = models.Model(input=[sentence_input, entity_markers], output=[main_output])
+    model.compile(optimizer=p['optimizer'], loss='categorical_crossentropy', metrics=['accuracy'])
+
+    return model
 
 class GlobalSumPooling1D(layers.Layer):
 
